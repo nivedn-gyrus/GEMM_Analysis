@@ -265,6 +265,35 @@ def reconstruct_C_matrix(C_tiles, m, p, tile_size):
 
     return C
 
+def get_tile_size(A, B):
+
+    L1_capacity = 16 * 1024 
+    L1_mac = 4096
+
+    m, n = A.shape
+    n, p = B.shape
+
+    total_memory = m * n + n * p + m * n
+
+    tile_sizes_to_choose_from = [2, 4, 8, 16, 64, 128 , 256]
+    best_tile_size = tile_sizes_to_choose_from[0]
+
+    if   total_memory > L1_capacity:
+
+        for t_size in tile_sizes_to_choose_from :
+
+            mem_tile = 3 * (tile_size * tile_size)
+
+            if mem_tile <= L1_capacity:
+                best_tile_size = t_size
+
+            else:
+                break
+    
+    return best_tile_size
+
+        
+
 if __name__ == "__main__":
     A = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
     B = np.array([[17, 18, 19, 20], [21, 22, 23, 24], [25, 26, 27, 28], [29, 30, 31, 32]])
@@ -293,7 +322,7 @@ if __name__ == "__main__":
     matrix_A_name = "A"
     matrix_B_name = "B"
     
-
+    # TODO : Add tiling logic based on L1 size
     tile_size = 2
 
     # creating L1 instance for each core
