@@ -1,5 +1,9 @@
 import math
 import numpy as np
+from collections import defaultdict
+from log_manager import log_instance
+
+
 
 
 # -----------------------------------
@@ -14,14 +18,23 @@ class InstrQueue:
         self.instr_full = False
 
     def instr_push(self, instr):
-        if len(self.instr_queue) >= self.queue_depth:
-            raise OverflowError(f"{self.instr_type} queue is full")
+
+        ## Disablin this check for debug now 
+        # TODO : Enabe this check with proper conditions
+
+        # if len(self.instr_queue) >= self.queue_depth:
+        #     raise OverflowError(f"{self.instr_type} queue is full")
+
         self.instr_queue.append(instr)
         self._update_flags()
 
     def instr_pop(self):
-        if not self.instr_queue:
-            raise IndexError(f"{self.instr_type} queue is empty")
+        ## Disablin this check for debug now 
+        # TODO : Enabe this check with proper conditions
+
+        # if not self.instr_queue:
+        #     raise IndexError(f"{self.instr_type} queue is empty")
+        
         instr = self.instr_queue.pop(0)  # FIFO
         self._update_flags()
         return instr
@@ -55,36 +68,72 @@ class MemOper:
         self.wait_cycles = self.latency + transfer_cycles
 
     def MemProcess(self):
+
+
+        # If no active instruction and queue not empty, start next
+        if not self.active_instr and not self.instr_queue.instr_empty:
+            self.active_instr = self.instr_queue.instr_pop()
+            num_bytes = self.active_instr.get("size", 0)
+            self.set_waitcycles(num_bytes)
+            log_instance.info(f"[{self.instr_type}] Started: {self.active_instr}")
+
+
         # If an instruction is active, process it
         if self.active_instr:
             if self.wait_cycles > 0:
                 self.wait_cycles -= 1
             else:
                 # Complete the copy
+                op = self.active_instr.get('op', None)
+                tile_name = self.active_instr.get('tile_name', None)
+                tile_type = self.active_instr.get('tile_type', None)
+                size = self.active_instr.get('size', None)
 
-                tile = self.active_instr['tile']
-                size = self.active_instr['size']
-                dim1, dim2 = self.active_instr['dims']
+                dim1, dim2 = self.active_instr.get('dims', (None, None))
 
                 if self.instr_type == "L1_to_L2":
-                    self.core_ref.L2_cache[tile] = self.core_ref.L1_cache[tile].copy()
+                    if tile_name not in  self.core_ref.L1_cache:
+                            return    
+                    self.core_ref.L2_cache[tile_name] = self.core_ref.L1_cache[tile_name].copy()
+                    log_instance.info( f"L2 Cache:  {self.core_ref.L2_cache}")
                 
                 elif self.instr_type == "L2_to_L1":
-                    self.core_ref.L1_cache[tile] = self.core_ref.L2_cache[tile].copy()
-                
+
+                    if tile_type == 'C_tile':
+                        if all(tile_name not in cache for cache in (self.core_ref.L1_cache, self.core_ref.L2_cache, self.core_ref.L3_cache)):
+                            self.core_ref.L1_cache[tile_name] = np.zeros((dim1, dim2))
+                            self.core_ref.out_tile_names.append(tile_name)
+                    else:
+
+                        if tile_name not in  self.core_ref.L2_cache:
+                            return    
+                        
+                        self.core_ref.L1_cache[tile_name] = self.core_ref.L2_cache[tile_name].copy()
+                    log_instance.info( f"L1 Cache:  {self.core_ref.L1_cache}")
+
                 elif self.instr_type == "L3_to_L2":
-                    if tile.startswith("A_tile"):
-                        parts = tile.split("_")
+
+                    start_flag = False
+                    if op == "START":
+                        self.core_ref.start_matmul = True
+                        if not start_flag:
+                            log_instance.info("START MATMUL SEQUENCE")
+                            start_flag = True
+                        return
+
+                    if tile_name.startswith("A_tile"):
+                        parts = tile_name.split("_")
                         i_idx = int(parts[2])
                         k_idx = int(parts[3])
                         tile_matrix = self.core_ref.L3_cache["A"][
                             i_idx * dim1 : i_idx * dim1 + dim1,
                             k_idx * dim2 : k_idx * dim2 + dim2
                         ]
-                        self.core_ref.L2_cache[tile] = tile_matrix.copy()
+                        self.core_ref.L2_cache[tile_name] = tile_matrix.copy()
+                        log_instance.info( f"L2 Cache:  {self.core_ref.L2_cache}")
 
-                    elif tile.startswith("B_tile"):
-                        parts = tile.split("_")
+                    elif tile_name.startswith("B_tile"):
+                        parts = tile_name.split("_")
                         k_idx = int(parts[2])
                         j_idx = int(parts[3])
                         tile_matrix = self.core_ref.L3_cache["B"][
@@ -92,22 +141,16 @@ class MemOper:
                             j_idx * dim2 : j_idx * dim2 + dim2
                         ]
 
-                        self.core_ref.L2_cache[tile] = tile_matrix.copy()
-
+                        self.core_ref.L2_cache[tile_name] = tile_matrix.copy()
+                        log_instance.info( f"L2 Cache:  {self.core_ref.L2_cache}")
 
                 elif self.instr_type == "L2_to_L3":
-                    self.core_ref.L3_cache[tile] = self.core_ref.L2_cache[tile].copy()
-                    
+                    self.core_ref.L3_cache[tile_name] = self.core_ref.L2_cache[tile_name].copy()
+                    log_instance.info( f"L3 Cache:  {self.core_ref.L3_cache}")
 
-                print(f"[{self.instr_type}] Completed: {self.active_instr}")
+                log_instance.info(f"[{self.instr_type}] Completed: {self.active_instr}")
                 self.active_instr = None
 
-        # If no active instruction and queue not empty, start next
-        if not self.active_instr and not self.instr_queue.instr_empty:
-            self.active_instr = self.instr_queue.instr_pop()
-            num_bytes = self.active_instr.get("size", 0)
-            self.set_waitcycles(num_bytes)
-            print(f"[{self.instr_type}] Started: {self.active_instr}")
 
         return 0   
     
@@ -125,42 +168,99 @@ class CoreUnit:
         self.L2_cache = {}
         self.L3_cache = {}
 
-        self.L1_to_L2_Process = MemOper("L1_to_L2", 10, 64, self)
-        self.L2_to_L1_Process = MemOper("L2_to_L1", 10, 64, self)
-        self.L3_to_L2_Process = MemOper("L3_to_L2", 200, 32, self)
-        self.L2_to_L3_Process = MemOper("L2_to_L3", 200, 32, self)
+        # Ref to result_name
+        self.out_tile_names = []
+
+        self.L1_to_L2_Process = MemOper("L1_to_L2", 1, 64, self)
+        self.L2_to_L1_Process = MemOper("L2_to_L1", 1, 64, self)
+        self.L3_to_L2_Process = MemOper("L3_to_L2", 20, 32, self)
+        self.L2_to_L3_Process = MemOper("L2_to_L3", 20, 32, self)
 
         self.MAC_InstrQueue = InstrQueue("MAC", 1)
 
         self.mac_wait_cycle = 0
         self.active_mac_instr = None
+        self.start_matmul = False
 
     def mac_operation(self):
+
+        min_matrix_need_for_op = 3
+        if len(self.L1_cache) < min_matrix_need_for_op:
+            return
+        
         if self.active_mac_instr:
             if self.mac_wait_cycle > 0:
                 self.mac_wait_cycle -= 1
             else:
-                print(f"[MAC] Completed: {self.active_mac_instr}")
+                log_instance.info(f"[MAC] Completed: {self.active_mac_instr}")
                 self.active_mac_instr = None
 
+        log_instance.info(f"\n L1 Cache : {self.L1_cache}")
+        log_instance.info(f"\n L2 Cache : {self.L2_cache}")
+        log_instance.info(f"\n L3 Cache : {self.L3_cache}")
+                   
         if not self.active_mac_instr and not self.MAC_InstrQueue.instr_empty:
             self.active_mac_instr = self.MAC_InstrQueue.instr_pop()
             m, n, k = self.active_mac_instr.get("dims", (1, 1, 1))
             mac_ops = m * n * k
             self.mac_wait_cycle = math.ceil(mac_ops / self.mac_cnt)
-            print(f"[MAC] Started: {self.active_mac_instr}")
+            log_instance.info(f"[MAC] Started: {self.active_mac_instr}")
 
-            a_tile = self.L1_cache[self.active_mac_instr.get("tile_A", None)]
-            b_tile = self.L1_cache[self.active_mac_instr.get("tile_B", None)]
-            matmul_result = a_tile @ b_tile
-            print(f"[MATMUL] Result: {matmul_result}")
+            # Reading the tiles present in L1 and performing tile matmul
+            a_tile_name = self.active_mac_instr.get("tile_A", None)
+            b_tile_name = self.active_mac_instr.get("tile_B", None)
+
+            if a_tile_name not in self.L1_cache or b_tile_name not in self.L1_cache:
+                return
+            
+            matmul_result = self.L1_cache[a_tile_name] @ self.L1_cache[b_tile_name]
+
+            # Getting C tile name
+            i_tile = int(a_tile_name.split("_")[2])
+            j_tile = int(b_tile_name.split("_")[3])
+            c_tile_name = f"C_tile_{i_tile}_{j_tile}"
+
+            log_instance.info(f"[MATMUL] Result :: {c_tile_name} : {matmul_result}")
+
+
+            if c_tile_name in self.L1_cache:
+                self.L1_cache[c_tile_name] += matmul_result
+
+
+    def get_result_matrix(self, tile_size):
+
+        m, p = self.L3_cache["A"].shape
+        p, n = self.L3_cache["B"].shape
+
+        result = np.zeros((m, n))
+
+        for tile_name in self.out_tile_names:
+    
+            _, _, i_str, j_str = tile_name.split("_")
+            i_tile = int(i_str)
+            j_tile = int(j_str)
+
+            i_start = i_tile * tile_size
+            j_start = j_tile * tile_size
+
+            tile_data = self.L2_cache[tile_name]
+    
+            result[i_start:i_start + tile_data.shape[0],j_start:j_start + tile_data.shape[1]] = tile_data
+
+            log_instance.info(f" RESULT : {result}")
 
     def main_loop(self):
-        self.L2_to_L1_Process.MemProcess()
-        self.L1_to_L2_Process.MemProcess()
+
+        # Assumption all the tiles are made avialable before L1 need it in L2
+        # TODO : understand and code how loading logic happens betweeen L3 and L2 when process are running parallel
         self.L3_to_L2_Process.MemProcess()
-        self.L2_to_L3_Process.MemProcess()
-        self.mac_operation()
+
+        if self.start_matmul:
+            
+            self.L2_to_L3_Process.MemProcess()
+            self.L2_to_L1_Process.MemProcess()
+            self.L1_to_L2_Process.MemProcess()  
+            self.mac_operation()
 
 
 def create_tile_map(A_matrix, B_matrix, tile_size):
@@ -257,39 +357,73 @@ def get_tile_processing_order(tile_map_matrix_A, tile_map_matrix_B):
 
 
     # Adding all the tile to L2 for simplicity
-    for i_tile, k_tile, a_name in A_tiles_info:
+    for _, _, a_name in A_tiles_info:
         processing_order.append(("LOAD_TO_L2", a_name, "A_tile"))
 
-    for b_k_tile, j_tile, b_name in B_tiles_info:
+    for _, _, b_name in B_tiles_info:
         processing_order.append(("LOAD_TO_L2", b_name, "B_tile"))
+
+    processing_order.append(("START", "MATMUL" ))
+
+
+    # Count how many times each C_tile[i][j] is updated
+    
+    c_tile_update_max = defaultdict(int)
+
+    for i_tile, k_tile, _ in A_tiles_info:
+        for b_k_tile, j_tile, _ in B_tiles_info:
+            if b_k_tile == k_tile:
+                c_tile_name = f"C_tile_{i_tile}_{j_tile}"
+                c_tile_update_max[c_tile_name] += 1
+             
+    c_tile_update_counts = defaultdict(int)
 
     # MATMUL order
     for i_tile, k_tile, a_name in A_tiles_info:
         processing_order.append(("LOAD_TO_L1", a_name, "A_tile"))
         for b_k_tile, j_tile, b_name in B_tiles_info:
             if b_k_tile == k_tile:
+
+                c_name = f"C_tile_{i_tile}_{j_tile}"
+
+                # Adding C_tile to L1
+                if c_tile_update_counts[c_name] == 0:
+                    processing_order.append(("LOAD_TO_L1", c_name, "C_tile"))
+
+                
                 processing_order.append(("LOAD_TO_L1", b_name, "B_tile"))
                 processing_order.append(("MATMUL", a_name, b_name))
                 processing_order.append(("EVICT_TO_L2", b_name))
+
+                c_tile_update_counts[c_name] += 1
+
+                if c_tile_update_counts[c_name] == c_tile_update_max[c_name]:
+                    processing_order.append(("EVICT_TO_L2", c_name))
+
         processing_order.append(("EVICT_TO_L2", a_name))
 
     return processing_order
     
-def add_instr_to_queue_for_processing(instr_order, core_unit):
+def add_instr_to_queue_for_processing(instr_order, core_unit, tile_size):
 
     for instruction in instr_order:
 
         tile_name = instruction[1]
-
+        
         if instruction[0] == "LOAD_TO_L2":
-            core_unit.L3_to_L2_Process.instr_queue.instr_push({"op": "LOAD", "tile": tile_name , "size": tile_size * tile_size, "dims":(tile_size , tile_size) })
+            tile_type = instruction[2]
+            core_unit.L3_to_L2_Process.instr_queue.instr_push({"op": "LOAD", "tile_type": tile_type, "tile_name": tile_name , "size": tile_size * tile_size, "dims":(tile_size , tile_size) })
+            log_instance.info(f"LOADED {tile_name} to [L2]")
 
 
         elif instruction[0] == "LOAD_TO_L1":
-            core_unit.L2_to_L1_Process.instr_queue.instr_push({"op": "LOAD", "tile": tile_name , "size": tile_size * tile_size, "dims":(tile_size , tile_size)})
+            tile_type = instruction[2]
+            core_unit.L2_to_L1_Process.instr_queue.instr_push({"op": "LOAD", "tile_type": tile_type, "tile_name": tile_name , "size": tile_size * tile_size, "dims":(tile_size , tile_size)})
+            log_instance.info(f"LOADED {tile_name} to [L1]")
 
         elif instruction[0] == "EVICT_TO_L2":
-            core_unit.L1_to_L2_Process.instr_queue.instr_push({"op": "EVICT", "tile": tile_name, "size": tile_size * tile_size, "dims":(tile_size , tile_size)})
+            core_unit.L1_to_L2_Process.instr_queue.instr_push({"op": "EVICT", "tile_type": tile_type, "tile_name": tile_name, "size": tile_size * tile_size, "dims":(tile_size , tile_size)})
+            log_instance.info(f"EVICTED {tile_name} to [L2]")
 
         elif instruction[0] == "MATMUL":
             a_tile_name = instruction[1]
@@ -297,6 +431,10 @@ def add_instr_to_queue_for_processing(instr_order, core_unit):
 
             core_unit.MAC_InstrQueue.instr_push({"op": "MATMUL", "tile_A": a_tile_name, "tile_B": b_tile_name , "dims": (tile_size, tile_size, tile_size)})
 
+
+        elif instruction[0] == "START":
+            core_unit.L3_to_L2_Process.instr_queue.instr_push({"op": "START"})
+            log_instance.info(f"[START]")
         
 if __name__ == "__main__":
 
@@ -325,33 +463,49 @@ if __name__ == "__main__":
     # We have the matrix in L3 --> That is the base assumption
     core_unit.L3_cache['A'] = A
     core_unit.L3_cache['B'] = B
-    print(f"Copied matrix A : {A}")
-    print(f"Copied matrix B : {B}")
+    log_instance.info(f"\n Copied matrix A : {A}")
+    log_instance.info(f" \n Copied matrix B : {B}")
+
+    log_instance.info(f"\n L3 Cache : {core_unit.L3_cache}")
+
+
 
 
     # Tile Size
     tile_size = 2  # get_tile_size(A, B) 
     tile_map_matrix_A, tile_map_matrix_B = create_tile_map(A, B, tile_size)
-    instr_order = get_tile_processing_order(tile_map_matrix_A, tile_map_matrix_B, core_unit)
+    instr_order = get_tile_processing_order(tile_map_matrix_A, tile_map_matrix_B)
 
-    # # Example instructions
+    # Logging instructions
+    log_instance.info("\n")
+    log_instance.info("#" * 20)
+    log_instance.info("#" * 20)
+    
+    for instr in instr_order:
+        log_instance.info(instr)
+
+    log_instance.info("#" * 20)
+    log_instance.info("#" * 20)
+
+
+    # # Example initial instruction proto
     # core_unit.L2_to_L1_Process.instr_queue.instr_push({"op": "LOAD", "tile": "A1", "size": 1024})
     # core_unit.L2_to_L1_Process.instr_queue.instr_push({"op": "LOAD", "tile": "B1", "size": 1024})
     # core_unit.MAC_InstrQueue.instr_push({"op": "MATMUL", "dims": (64, 64, 64)})
     # core_unit.L1_to_L2_Process.instr_queue.instr_push({"op": "EVICT", "tile": "C1", "size": 2048})
 
-    add_instr_to_queue_for_processing(instr_order, tile_map_matrix_A, tile_map_matrix_B, core_unit, tile_size)
+    add_instr_to_queue_for_processing(instr_order, core_unit, tile_size)
 
 
     # -----------------------------------
     # Main Simulation Loop
     # -----------------------------------
     CycleCnt = 0
-    MAX_CYCLES = 200
+    MAX_CYCLES = 200000000
 
     while CycleCnt < MAX_CYCLES:
         CycleCnt += 1
-        print(f"\n--- Cycle {CycleCnt} ---")
+        log_instance.info(f"\n--- Cycle {CycleCnt} ---")
         core_unit.main_loop()
 
         # Break early if no work left
@@ -368,5 +522,11 @@ if __name__ == "__main__":
             and not core_unit.L2_to_L3_Process.active_instr
         )
         if all_empty:
-            print("\n[Simulation completed]")
+
+            core_unit.reconstruct_result_matrix(tile_size)
+            log_instance.info(f"REFERENCE RESULT : {ref_result}")
+            log_instance.info("\n[Simulation completed]")
             break  
+
+    
+    
