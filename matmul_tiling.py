@@ -113,13 +113,6 @@ class MemOper:
 
                 elif self.instr_type == "L3_to_L2":
 
-                    start_flag = False
-                    if op == "START":
-                        self.core_ref.start_matmul = True
-                        if not start_flag:
-                            log_instance.info("START MATMUL SEQUENCE")
-                            start_flag = True
-                        return
 
                     if tile_name.startswith("A_tile"):
                         parts = tile_name.split("_")
@@ -155,18 +148,69 @@ class MemOper:
         return 0   
     
 # -----------------------------------
+# MultiCore Processing Unit
+# -----------------------------------
+class MutiCoreUnit:
+    def __init__(self, num_cores, l1_size, l2_size, mac_cnt):
+
+        self.num_cores = num_cores
+        self.cores = [(f"core_{i}", CoreUnit(l1_size, mac_cnt)) for i in range(self.num_cores)]
+        
+
+        # Shared Cache
+        self.L2_cache = {}
+        self.L3_cache = {}
+
+    def disrtibute_instruction(self):
+        pass
+
+    def run(self, max_cycle=100000):
+
+        cycle_cnt = 0
+        MAX_CYCLES = max_cycle
+
+        # -----------------------------------
+        # Main Loop
+        # -----------------------------------        
+
+        while cycle_cnt < MAX_CYCLES:
+            cycle_cnt += 1
+            log_instance.info()
+            log_instance.info(f"\n--- Cycle {cycle_cnt} ---")
+            
+            for core_id, core_unit in self.cores:
+                core_unit.main_loop()
+
+                # Break early if no work left
+                all_empty = (
+                    core_unit.L1_to_L2_Process.instr_queue.instr_empty
+                    and core_unit.L2_to_L1_Process.instr_queue.instr_empty
+                    and core_unit.L3_to_L2_Process.instr_queue.instr_empty
+                    and core_unit.L2_to_L3_Process.instr_queue.instr_empty
+                    and core_unit.MAC_InstrQueue.instr_empty
+                    and not core_unit.active_mac_instr
+                    and not core_unit.L1_to_L2_Process.active_instr
+                    and not core_unit.L2_to_L1_Process.active_instr
+                    and not core_unit.L3_to_L2_Process.active_instr
+                    and not core_unit.L2_to_L3_Process.active_instr
+                )
+
+                if all_empty:
+                    log_instance.info(f"\n Exiting core : {core_id} loop")
+                    break
+
+
+# -----------------------------------
 # Core Processing Unit
 # -----------------------------------
 class CoreUnit:
-    def __init__(self, l1_size, l2_size, mac_cnt):
+    def __init__(self, l1_size, mac_cnt):
         self.l1_size = l1_size
         self.l2_size = l2_size
         self.mac_cnt = mac_cnt
 
         # cache 
         self.L1_cache = {}
-        self.L2_cache = {}
-        self.L3_cache = {}
 
         # Ref to result_name
         self.out_tile_names = []
@@ -180,7 +224,6 @@ class CoreUnit:
 
         self.mac_wait_cycle = 0
         self.active_mac_instr = None
-        self.start_matmul = False
 
     def mac_operation(self):
 
@@ -227,40 +270,16 @@ class CoreUnit:
                 self.L1_cache[c_tile_name] += matmul_result
 
 
-    def get_result_matrix(self, tile_size):
-
-        m, p = self.L3_cache["A"].shape
-        p, n = self.L3_cache["B"].shape
-
-        result = np.zeros((m, n))
-
-        for tile_name in self.out_tile_names:
-    
-            _, _, i_str, j_str = tile_name.split("_")
-            i_tile = int(i_str)
-            j_tile = int(j_str)
-
-            i_start = i_tile * tile_size
-            j_start = j_tile * tile_size
-
-            tile_data = self.L2_cache[tile_name]
-    
-            result[i_start:i_start + tile_data.shape[0],j_start:j_start + tile_data.shape[1]] = tile_data
-
-            log_instance.info(f" RESULT : {result}")
 
     def main_loop(self):
 
         # Assumption all the tiles are made avialable before L1 need it in L2
         # TODO : understand and code how loading logic happens betweeen L3 and L2 when process are running parallel
         self.L3_to_L2_Process.MemProcess()
-
-        if self.start_matmul:
-            
-            self.L2_to_L3_Process.MemProcess()
-            self.L2_to_L1_Process.MemProcess()
-            self.L1_to_L2_Process.MemProcess()  
-            self.mac_operation()
+        self.L2_to_L3_Process.MemProcess()
+        self.L2_to_L1_Process.MemProcess()
+        self.L1_to_L2_Process.MemProcess()  
+        self.mac_operation()
 
 
 def create_tile_map(A_matrix, B_matrix, tile_size):
@@ -363,9 +382,6 @@ def get_tile_processing_order(tile_map_matrix_A, tile_map_matrix_B):
     for _, _, b_name in B_tiles_info:
         processing_order.append(("LOAD_TO_L2", b_name, "B_tile"))
 
-    processing_order.append(("START", "MATMUL" ))
-
-
     # Count how many times each C_tile[i][j] is updated
     
     c_tile_update_max = defaultdict(int)
@@ -432,9 +448,6 @@ def add_instr_to_queue_for_processing(instr_order, core_unit, tile_size):
             core_unit.MAC_InstrQueue.instr_push({"op": "MATMUL", "tile_A": a_tile_name, "tile_B": b_tile_name , "dims": (tile_size, tile_size, tile_size)})
 
 
-        elif instruction[0] == "START":
-            core_unit.L3_to_L2_Process.instr_queue.instr_push({"op": "START"})
-            log_instance.info(f"[START]")
         
 if __name__ == "__main__":
 
@@ -451,22 +464,24 @@ if __name__ == "__main__":
     ref_result =  A @ B
 
     # -----------------------------------
-    # Hardware setup  --> Only one core
+    # Hardware setup  
     # -----------------------------------
     l1_size = 16 * 1024
     l2_size = 16 * 1024 * 1024
     mac_cnt = 4096
+    num_cores = 1
 
     # creating the Core instance
-    core_unit = CoreUnit(l1_size, l2_size, mac_cnt)
+    multicore_unit = MutiCoreUnit(num_cores, l1_size, l2_size, mac_cnt)
+    #core_unit = CoreUnit(l1_size, l2_size, mac_cnt)
 
     # We have the matrix in L3 --> That is the base assumption
-    core_unit.L3_cache['A'] = A
-    core_unit.L3_cache['B'] = B
+    multicore_unit.L3_cache['A'] = A
+    multicore_unit.L3_cache['B'] = B
     log_instance.info(f"\n Copied matrix A : {A}")
     log_instance.info(f" \n Copied matrix B : {B}")
 
-    log_instance.info(f"\n L3 Cache : {core_unit.L3_cache}")
+    log_instance.info(f"\n L3 Cache : {multicore_unit.L3_cache}")
 
 
 
@@ -494,39 +509,16 @@ if __name__ == "__main__":
     # core_unit.MAC_InstrQueue.instr_push({"op": "MATMUL", "dims": (64, 64, 64)})
     # core_unit.L1_to_L2_Process.instr_queue.instr_push({"op": "EVICT", "tile": "C1", "size": 2048})
 
-    add_instr_to_queue_for_processing(instr_order, core_unit, tile_size)
+    add_instr_to_queue_for_processing(instr_order, multicore_unit, tile_size)
+    
+    max_cycles = 200000000
+    multicore_unit.run(max_cycles)
 
 
-    # -----------------------------------
-    # Main Simulation Loop
-    # -----------------------------------
-    CycleCnt = 0
-    MAX_CYCLES = 200000000
-
-    while CycleCnt < MAX_CYCLES:
-        CycleCnt += 1
-        log_instance.info(f"\n--- Cycle {CycleCnt} ---")
-        core_unit.main_loop()
-
-        # Break early if no work left
-        all_empty = (
-            core_unit.L1_to_L2_Process.instr_queue.instr_empty
-            and core_unit.L2_to_L1_Process.instr_queue.instr_empty
-            and core_unit.L3_to_L2_Process.instr_queue.instr_empty
-            and core_unit.L2_to_L3_Process.instr_queue.instr_empty
-            and core_unit.MAC_InstrQueue.instr_empty
-            and not core_unit.active_mac_instr
-            and not core_unit.L1_to_L2_Process.active_instr
-            and not core_unit.L2_to_L1_Process.active_instr
-            and not core_unit.L3_to_L2_Process.active_instr
-            and not core_unit.L2_to_L3_Process.active_instr
-        )
-        if all_empty:
-
-            core_unit.reconstruct_result_matrix(tile_size)
-            log_instance.info(f"REFERENCE RESULT : {ref_result}")
-            log_instance.info("\n[Simulation completed]")
-            break  
+    multicore_unit.reconstruct_result_matrix(tile_size)
+    log_instance.info(f"REFERENCE RESULT : {ref_result}")
+    log_instance.info("\n[Simulation completed]")
+            
 
     
     
